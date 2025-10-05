@@ -1,0 +1,136 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Global Installs by Category — Choropleth (6–8 PM IST)</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    body{margin:0;background:#0b1220;color:#e8eefc;font:14px system-ui}
+    header{padding:18px 20px;border-bottom:1px solid #1f2a44}
+    h1{font-size:18px;margin:0}
+    .wrap{max-width:1100px;margin:16px auto;padding:0 16px}
+    .panel{background:#121a2b;border:1px solid #1f2a44;border-radius:14px;padding:14px;margin-bottom:14px}
+    #notice{padding:16px;background:#271a00;border:1px solid #5b4100;color:#ffd37a;border-radius:10px;display:none}
+    #chart{height:620px}
+    label{font-weight:600}
+    select,input{background:#0b1220;color:#e8eefc;border:1px solid #2a395f;border-radius:8px;padding:6px 8px}
+  </style>
+</head>
+<body>
+  <header><div class="wrap"><h1>Global Installs by Category — Choropleth</h1></div></header>
+  <main class="wrap">
+    <div id="notice" class="panel"></div>
+    <div id="ui" class="panel">
+      <label>Category</label>
+      <select id="category"></select>
+      <label>Threshold</label>
+      <input id="threshold" type="number" value="1000000" />
+      <label>Highlight</label>
+      <select id="toggle"><option value="on" selected>On</option><option value="off">Off</option></select>
+    </div>
+    <div id="chart" class="panel"></div>
+  </main>
+<script>
+const DEV_BYPASS = new URLSearchParams(location.search).has("dev");
+// ⬇️ set this to your actual CSV location
+const DATA_PATH = "installs_by_country.csv";
+
+function nowIST(){
+  const f=new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Kolkata",hour12:false,hour:"2-digit",minute:"2-digit"});
+  const p=Object.fromEntries(f.formatToParts(new Date()).map(x=>[x.type,x.value]));
+  return parseInt(p.hour,10);
+}
+function withinWindow(){const h=nowIST();return h>=18 && h<20;}
+
+function show(msg){
+  const n=document.getElementById("notice");
+  n.style.display="block"; n.innerHTML=msg;
+  document.getElementById("ui").style.display="none";
+  document.getElementById("chart").style.display="none";
+}
+function unhide(){
+  document.getElementById("notice").style.display="none";
+  document.getElementById("ui").style.display="block";
+  document.getElementById("chart").style.display="block";
+}
+
+if(!DEV_BYPASS && !withinWindow()){
+  show("⏳ Available only between <strong>6:00–8:00 PM IST</strong>.");
+}else{
+  unhide();
+  if(DEV_BYPASS){
+    const n=document.getElementById("notice"); n.style.display="block";
+    n.innerHTML="🧪 Dev mode active (time gate bypassed).";
+  }
+  init();
+}
+
+let DATA=[];
+async function init(){
+  try{
+    const res=await fetch(DATA_PATH);
+    if(!res.ok) throw new Error("Fetch failed ("+res.status+") for "+DATA_PATH);
+    const text=await res.text();
+    const parsed=Papa.parse(text,{header:true,skipEmptyLines:true});
+    DATA = parsed.data.map(r=>({
+      category:String(r.category||r.Category||"").trim(),
+      country_iso3:String(r.country_iso3||r.COUNTRY_ISO3||r.country||"").trim().toUpperCase(),
+      installs:Number(r.installs||r.Installs||0)
+    })).filter(r=>r.category && r.country_iso3 && !Number.isNaN(r.installs));
+
+    if(!DATA.length) throw new Error("CSV parsed but produced 0 usable rows");
+
+    buildUI(DATA);
+  }catch(e){
+    console.error(e);
+    show("❗ "+e.message+"<br>Checklist: 1) CSV path, 2) run via http server, 3) headers: category,country_iso3,installs");
+  }
+}
+
+function buildUI(rows){
+  const excluded=new Set(["A","C","G","S"]);
+  const totals={};
+  for(const r of rows){
+    if(!r.category) continue;
+    if(excluded.has((r.category[0]||"").toUpperCase())) continue;
+    totals[r.category]=(totals[r.category]||0)+r.installs;
+  }
+  const top5=Object.entries(totals).sort((a,b)=>b[1]-a[1]).slice(0,5).map(x=>x[0]);
+  if(!top5.length){ show("❗ No categories after exclusion/Top-5. Try lowering exclusions or check data."); return; }
+
+  const sel=document.getElementById("category");
+  sel.innerHTML="";
+  top5.forEach(c=>{const o=document.createElement("option");o.value=o.textContent=c;sel.appendChild(o);});
+
+  const thr=document.getElementById("threshold");
+  const tog=document.getElementById("toggle");
+  const render=()=>draw(rows, sel.value, parseInt(thr.value||"0",10), tog.value==="on");
+  sel.onchange=render; thr.oninput=render; tog.onchange=render;
+  render();
+}
+
+function draw(rows, category, threshold, showHighlight){
+  const f=rows.filter(r=>r.category===category);
+  if(!f.length){ show("❗ No rows for selected category."); return; }
+
+  const base={type:"choropleth",locations:f.map(r=>r.country_iso3),z:f.map(r=>r.installs),
+    colorscale:"Viridis",colorbar:{title:"Installs"},hovertemplate:"<b>%{location}</b><br>Installs: %{z:,}<extra></extra>"};
+  const data=[base];
+
+  if(showHighlight){
+    const hi=f.filter(r=>r.installs>threshold);
+    if(hi.length){
+      data.push({type:"choropleth",locations:hi.map(r=>r.country_iso3),z:hi.map(r=>r.installs),
+        colorscale:[[0,"rgba(0,0,0,0)"],[1,"rgba(0,0,0,0)"]],showscale:false,
+        marker:{line:{width:2.5,color:"red"}},hoverinfo:"skip"});
+    }
+  }
+
+  Plotly.newPlot("chart",data,{geo:{projection:{type:"natural earth"}},margin:{l:0,r:0,t:40,b:0},
+    paper_bgcolor:"#121a2b",plot_bgcolor:"#121a2b",font:{color:"#e8eefc"}});
+}
+</script>
+
+</body></html>
